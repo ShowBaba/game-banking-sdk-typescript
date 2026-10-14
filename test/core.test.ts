@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
-  ConflictError, ConnectionError, GameBank, GameBankError, InsufficientFundsError, RateLimitError, ServerError,
+  ConflictError, ConnectionError, FeeChangedError, GameBank, GameBankError, InsufficientFundsError, RateLimitError, ServerError,
   formatMinor, toMinor,
 } from "../src/index.js";
 
@@ -136,7 +136,11 @@ describe("errors", () => {
       return true;
     });
     const c = fakeFetch([err(409, "idempotency_key_reused")]);
-    await assert.rejects(client(c.fn).transfers.create({ source_account_id: "a", destination_account_id: "b", amount_minor: 9 }), ConflictError);
+    await assert.rejects(client(c.fn).transfers.create({ source_account_id: "a", destination_account_id: "b", amount_minor: 9 }),
+      (e: unknown) => e instanceof ConflictError && !(e instanceof FeeChangedError));
+    const f = fakeFetch([err(409, "fee_changed", { fees_total_minor: 70, max_fee_minor: 60 })]);
+    await assert.rejects(client(f.fn).transfers.create({ source_account_id: "a", destination_account_id: "b", amount_minor: 9, max_fee_minor: 60 }),
+      (e: unknown) => e instanceof FeeChangedError && e instanceof ConflictError && e.details.fees_total_minor === 70);
   });
 
   it("reports a network failure as ConnectionError after retries", async () => {

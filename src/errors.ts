@@ -30,6 +30,12 @@ export class PermissionDeniedError extends GameBankError {}
 export class NotFoundError extends GameBankError {}
 /** 409: e.g. idempotency_key_reused, already_reversed, email_taken. */
 export class ConflictError extends GameBankError {}
+/**
+ * 409 fee_changed: the fees now total more than the request's max_fee_minor,
+ * e.g. the bank's fee schedule changed after the player saw a quote.
+ * details.fees lists the current charges; get a new quote.
+ */
+export class FeeChangedError extends ConflictError {}
 /** 400, 413, 415: the request itself is invalid. */
 export class InvalidRequestError extends GameBankError {}
 /** 422 business rule failure, e.g. account_frozen, hold_not_active. */
@@ -52,7 +58,7 @@ export function errorFor(init: ConstructorParameters<typeof GameBankError>[0]): 
   if (status === 401) return new AuthenticationError(init);
   if (status === 403) return new PermissionDeniedError(init);
   if (status === 404) return new NotFoundError(init);
-  if (status === 409) return new ConflictError(init);
+  if (status === 409) return code === "fee_changed" ? new FeeChangedError(init) : new ConflictError(init);
   if (status === 429) return new RateLimitError(init);
   if (status === 422) {
     if (code === "insufficient_funds") return new InsufficientFundsError(init);

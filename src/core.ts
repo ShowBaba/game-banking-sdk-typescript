@@ -1,7 +1,7 @@
 import { ConnectionError, GameBankError, errorFor } from "./errors.js";
 import type { Environment } from "./types.js";
 
-export const VERSION = "0.1.0";
+export const VERSION = "0.2.0";
 
 export interface ClientOptions {
   /** Game API key or developer credential. Defaults to the GBE_API_KEY environment variable. */

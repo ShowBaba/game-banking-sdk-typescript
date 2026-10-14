@@ -88,7 +88,14 @@ export interface Entry {
   side: "debit" | "credit";
   amount_minor: number;
   balance_after: number;
+  /** principal, or a fee or levy charged with the payment. */
+  kind: EntryKind;
+  /** On fee and levy lines: the fee rule that charged it, and its name. */
+  fee_rule_id?: string;
+  description?: string;
 }
+
+export type EntryKind = "principal" | "fee" | "levy";
 
 export interface Transaction {
   id: string;
@@ -122,6 +129,8 @@ export interface HistoryItem {
   amount_minor: number;
   amount_display: string;
   balance_after: number;
+  /** principal, fee or levy. A fee or levy line's narration is the fee's name. */
+  kind: EntryKind;
   narration: string | null;
   reference: string | null;
   counterparty: { account_id: string; account_number: string; account_name: string; bank_code: string } | null;
@@ -142,6 +151,8 @@ export interface Hold {
   account_id: string;
   destination_account_id: string | null;
   amount_minor: number;
+  /** Held on top of the amount for the capture's expected fees. */
+  reserved_fee_minor: number;
   captured_amount_minor: number | null;
   status: "active" | "captured" | "released" | "expired";
   reason: string;
@@ -206,6 +217,11 @@ export interface TransferResult {
   transaction: Transaction;
   source_balance: Balance;
   destination_balance?: Balance;
+  /** Fees and levies charged to the sender on top of the amount. */
+  fees: FeeCharge[];
+  fees_total_minor: number;
+  /** Amount plus fees. */
+  total_debit_minor: number;
 }
 export interface HoldResult {
   hold: Hold;
@@ -216,6 +232,9 @@ export interface CaptureResult {
   transaction: Transaction;
   source_balance: Balance;
   destination_balance?: Balance;
+  fees: FeeCharge[];
+  fees_total_minor: number;
+  total_debit_minor: number;
 }
 export interface AdvanceClockResult {
   clock: Clock;
@@ -270,6 +289,11 @@ export interface TransferParams {
   reference?: string;
   narration?: string;
   metadata?: Metadata;
+  /**
+   * Refuse with FeeChangedError if the fees now total more than this, e.g. the
+   * fees_total_minor of a quote the player accepted.
+   */
+  max_fee_minor?: number;
 }
 export interface PlaceHoldParams {
   account_id: string;
@@ -280,6 +304,8 @@ export interface PlaceHoldParams {
   destination_account_number?: string;
   expires_at_game?: string;
   expires_in_game_seconds?: number;
+  /** Caps the capture fee reserved now (FeeChangedError if higher). */
+  max_fee_minor?: number;
 }
 export interface CaptureHoldParams {
   /** Omit to capture the whole hold. */
@@ -289,6 +315,8 @@ export interface CaptureHoldParams {
   narration?: string;
   reference?: string;
   metadata?: Metadata;
+  /** Refuse with FeeChangedError if the capture's fees now total more than this. */
+  max_fee_minor?: number;
 }
 export interface ReverseParams {
   reason: string;
@@ -329,6 +357,114 @@ export interface AdvanceClockParams {
   days?: number;
   /** Advance to this game time (RFC 3339) instead of by a duration. */
   to?: string;
+}
+
+// ---- fees and charges ----
+
+export type FeeEvent = "transfer" | "hold_capture" | "account_maintenance";
+export type FeeKind = "fee" | "levy";
+export type FeeModel = "fixed" | "percentage" | "combined";
+export type FeeRuleState = "in_effect" | "scheduled" | "ended" | "inactive";
+
+/** A fee or levy a bank charges. Amounts are minor units; times are game time. */
+export interface FeeRule {
+  id: string;
+  bank_id: string;
+  /** Stable identifier, e.g. "player_transfer_fee". Cannot change. */
+  code: string;
+  /** Shown on statements. */
+  name: string;
+  event: FeeEvent;
+  /** A fee credits the bank's fee_income; a levy credits levies_payable. */
+  kind: FeeKind;
+  model: FeeModel;
+  fixed_minor: number;
+  /** Basis points: 100 = 1%. */
+  percentage_bps: number;
+  min_fee_minor: number | null;
+  max_fee_minor: number | null;
+  /** Applies only from this amount, inclusive (the account balance, for maintenance). */
+  min_amount_minor: number | null;
+  max_amount_minor: number | null;
+  payer: "sender";
+  credit_account: "fee_income" | "levies_payable";
+  status: "active" | "inactive";
+  effective_from: string;
+  /** Exclusive. */
+  effective_to: string | null;
+  version: number;
+  /** Where the rule stands at the current game time. Only in_effect rules charge. */
+  state: FeeRuleState;
+  /** Settings that are valid but can never take effect. */
+  warnings: string[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateFeeRuleParams {
+  code: string;
+  name: string;
+  event: FeeEvent;
+  model: FeeModel;
+  kind?: FeeKind;
+  fixed_minor?: number;
+  percentage_bps?: number;
+  min_fee_minor?: number;
+  max_fee_minor?: number;
+  min_amount_minor?: number;
+  max_amount_minor?: number;
+  status?: "active" | "inactive";
+  /** Game time; defaults to now. */
+  effective_from?: string;
+  effective_to?: string;
+  /** Start at the current game time. Do not combine with effective_from. */
+  start_now?: boolean;
+}
+
+/** Send only what changes. code and event cannot change. */
+export interface UpdateFeeRuleParams extends Partial<Omit<CreateFeeRuleParams, "code" | "event">> {
+  /** Fields to reset to "no limit", e.g. ["max_fee_minor", "effective_to"]. */
+  clear?: Array<"min_fee_minor" | "max_fee_minor" | "min_amount_minor" | "max_amount_minor" | "effective_to">;
+}
+
+/** One fee or levy charged on a payment. */
+export interface FeeCharge {
+  fee_rule_id: string;
+  fee_rule_version: number;
+  code: string;
+  name: string;
+  kind: FeeKind;
+  amount_minor: number;
+  credit_account: "fee_income" | "levies_payable";
+}
+
+export interface QuoteFeesParams {
+  bank_id: string;
+  amount_minor: number;
+  /** Defaults to transfer. */
+  event?: "transfer" | "hold_capture";
+}
+
+export interface FeeQuote {
+  bank_id: string;
+  event: "transfer" | "hold_capture";
+  amount_minor: number;
+  fees: FeeCharge[];
+  fees_total_minor: number;
+  total_debit_minor: number;
+  game_time: string;
+}
+
+/** The bank's own ledger accounts, from which its profit and loss derives. */
+export interface BankBooks {
+  bank_id: string;
+  currency: string;
+  /** Fees the bank has earned. */
+  fee_income_minor: number;
+  /** Levies collected and held for others. */
+  levies_payable_minor: number;
+  accounts: Array<{ system_role: string; account_name: string; account_number: string; balance_minor: number; balance_display: string }>;
+  as_of: string;
 }
 
 // ---- management (developer credential) ----
@@ -393,6 +529,11 @@ export interface AuditLog {
 export type Scope =
   | "bank:read" | "bank:write" | "account:read" | "account:write"
   | "transfer:create" | "funding:create" | "transaction:reverse" | "limits:write";
+export interface UpdateGameParams {
+  name?: string;
+  slug?: string;
+  status?: "active" | "suspended";
+}
 export interface IssueApiKeyParams {
   environment: Environment;
   label?: string;

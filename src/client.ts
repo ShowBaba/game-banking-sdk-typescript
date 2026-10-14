@@ -127,9 +127,39 @@ export class Banks extends Resource {
   limits(bankId: string, ro?: RequestOptions) {
     return this.t.request<T.Limits>({ method: "GET", path: `/v1/banks/${enc(bankId)}/limits` }, ro);
   }
+  /** The bank's own ledger accounts: fee income earned and levies held. */
+  books(bankId: string, ro?: RequestOptions) {
+    return this.t.request<T.BankBooks>({ method: "GET", path: `/v1/banks/${enc(bankId)}/books` }, ro);
+  }
   /** Sets per-transaction and daily caps; null removes a scope's limits. Needs limits:write. */
   setLimits(bankId: string, params: T.SetLimitsParams, ro?: RequestOptions) {
     return this.t.request<T.Limits>({ method: "PUT", path: `/v1/banks/${enc(bankId)}/limits`, body: params }, ro);
+  }
+}
+
+export class Fees extends Resource {
+  /** A bank's fees and levies, active and inactive, each with its current state. */
+  async list(bankId: string, ro?: RequestOptions): Promise<T.FeeRule[]> {
+    return (await this.t.request<{ data: T.FeeRule[] }>({ method: "GET", path: `/v1/banks/${enc(bankId)}/fees` }, ro)).data;
+  }
+  get(bankId: string, feeId: string, ro?: RequestOptions) {
+    return this.t.request<T.FeeRule>({ method: "GET", path: `/v1/banks/${enc(bankId)}/fees/${enc(feeId)}` }, ro);
+  }
+  /** Adds a fee or levy. Needs bank:write. */
+  create(bankId: string, params: T.CreateFeeRuleParams, ro?: RequestOptions) {
+    return this.t.request<T.FeeRule>({ method: "POST", path: `/v1/banks/${enc(bankId)}/fees`, body: params }, ro);
+  }
+  /** Changes, pauses ({ status: "inactive" }) or resumes a fee; bumps its version. Needs bank:write. */
+  update(bankId: string, feeId: string, params: T.UpdateFeeRuleParams, ro?: RequestOptions) {
+    return this.t.request<T.FeeRule>({ method: "PATCH", path: `/v1/banks/${enc(bankId)}/fees/${enc(feeId)}`, body: params }, ro);
+  }
+  /**
+   * What a transfer or hold capture would cost now. Show it to the player, then
+   * pass fees_total_minor as max_fee_minor on the payment.
+   */
+  async quote(params: T.QuoteFeesParams, ro?: RequestOptions): Promise<T.FeeQuote> {
+    checkAmount(params, true);
+    return this.t.request<T.FeeQuote>({ method: "POST", path: "/v1/fees/quote", body: params }, ro);
   }
 }
 
@@ -174,6 +204,7 @@ export class GameBank {
   readonly holds: Holds;
   readonly transactions: Transactions;
   readonly banks: Banks;
+  readonly fees: Fees;
   readonly currencies: Currencies;
   readonly clock: GameClock;
   protected readonly transport: Transport;
@@ -189,6 +220,7 @@ export class GameBank {
     this.holds = new Holds(t);
     this.transactions = new Transactions(t);
     this.banks = new Banks(t);
+    this.fees = new Fees(t);
     this.currencies = new Currencies(t);
     this.clock = new GameClock(t);
   }
@@ -214,8 +246,16 @@ class Games extends Resource {
   get(gameId: string, ro?: RequestOptions) {
     return this.t.request<T.Game>({ method: "GET", path: `/v1/games/${enc(gameId)}` }, ro);
   }
-  update(gameId: string, params: { status: "active" | "suspended" }, ro?: RequestOptions) {
+  /** Renames a game, changes its slug, or suspends/reactivates it. */
+  update(gameId: string, params: T.UpdateGameParams, ro?: RequestOptions) {
     return this.t.request<T.Game>({ method: "PATCH", path: `/v1/games/${enc(gameId)}`, body: params }, ro);
+  }
+  /**
+   * Deletes a game permanently: every API key is revoked at once and the game
+   * leaves the developer API. Ledger and audit history are kept.
+   */
+  delete(gameId: string, ro?: RequestOptions) {
+    return this.t.request<void>({ method: "DELETE", path: `/v1/games/${enc(gameId)}` }, ro);
   }
 }
 

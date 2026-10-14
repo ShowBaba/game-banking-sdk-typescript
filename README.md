@@ -40,6 +40,31 @@ for await (const line of gb.accounts.iterateTransactions(account.id)) console.lo
 
 Holds: `gb.holds.place(...)`, `gb.holds.capture(id, { amount_minor })`, `gb.holds.release(id)`. Reversals: `gb.transactions.reverse(id, { reason })`. Clock: `gb.clock.get()`, `configure()`, `advance()`.
 
+## Fees and charges
+
+```ts
+import { FeeChangedError } from "@gamebanking/sdk";
+
+// Show the player what the transfer costs, then cap the fee at what they saw.
+const quote = await gb.fees.quote({ bank_id: BANK_ID, amount_minor: 2_000_00 });
+try {
+  const r = await gb.transfers.create({
+    source_account_id: account.id, destination_account_number: "5915945174",
+    amount_minor: 2_000_00, max_fee_minor: quote.fees_total_minor,
+  });
+  console.log(r.fees, r.total_debit_minor); // each fee is its own ledger and statement line
+} catch (e) {
+  if (e instanceof FeeChangedError) { /* the schedule changed: quote again */ } else throw e;
+}
+
+// Configure fees (bank:write): ₦50 + 1%, capped at ₦500, on transfers of ₦1,000 or more.
+await gb.fees.create(BANK_ID, {
+  code: "transfer_fee", name: "Transfer fee", event: "transfer", model: "combined",
+  fixed_minor: 50_00, percentage_bps: 100, max_fee_minor: 500_00, min_amount_minor: 1_000_00,
+});
+const books = await gb.banks.books(BANK_ID); // fee_income_minor, levies_payable_minor
+```
+
 ## Setup and CI
 
 ```ts
@@ -51,6 +76,8 @@ const key = await mgmt.apiKeys.issue(game.id, { environment: "sandbox", scopes: 
 console.log(key.secret); // shown once
 await mgmt.game(game.id, "sandbox").banks.create({ name: "Eko Trust Bank", base_currency: "NGN" });
 ```
+
+`mgmt.games.update(id, { name, slug, status })` renames or suspends a game; `mgmt.games.delete(id)` deletes it and revokes its keys.
 
 ## Behaviour
 

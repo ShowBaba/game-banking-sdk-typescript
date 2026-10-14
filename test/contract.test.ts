@@ -3,8 +3,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  ConflictError, GameBank, GameBankManagement, InsufficientFundsError, NotFoundError, PermissionDeniedError,
-  type ResponseInfo, type Scope,
+  AuthenticationError, ConflictError, FeeChangedError, GameBank, GameBankManagement, InsufficientFundsError, NotFoundError,
+  PermissionDeniedError, type ResponseInfo, type Scope,
 } from "../src/index.js";
 
 const baseUrl = process.env.GBE_BASE_URL;
@@ -27,7 +27,7 @@ test("PRD §16.2 journey through the TypeScript SDK", { skip: !baseUrl && "set G
   const key = await mgmt.apiKeys.issue(game.id, { environment: "sandbox", label: "contract", scopes: ALL_SCOPES });
   assert.ok(key.secret?.startsWith("gbe_test_sk_"));
   const bank = await mgmt.game(game.id, "sandbox").banks.create({ name: "Eko Trust Bank", base_currency: "NGN" });
-  assert.equal(bank.system_accounts?.length, 7);
+  assert.equal(bank.system_accounts?.length, 8); // incl. levies_payable
   const readOnly = await mgmt.apiKeys.issue(game.id, { environment: "sandbox", scopes: ["account:read"] });
 
   const responses: ResponseInfo[] = [];
@@ -73,6 +73,7 @@ test("PRD §16.2 journey through the TypeScript SDK", { skip: !baseUrl && "set G
   const held = await gb.holds.place({ account_id: adaAcct.id, amount_minor: 3_000_00, reason: "Order #1", destination_account_id: tundeAcct.id });
   assert.equal(held.balance.posted_balance, 7_500_00);
   assert.equal(held.balance.available_balance, 4_500_00);
+  assert.equal(held.hold.reserved_fee_minor, 0, "no hold_capture fees configured yet");
   const cap = await gb.holds.capture(held.hold.id, { amount_minor: 2_000_00 });
   assert.equal(cap.hold.status, "captured");
   assert.equal(cap.source_balance.posted_balance, 5_500_00);
@@ -107,10 +108,50 @@ test("PRD §16.2 journey through the TypeScript SDK", { skip: !baseUrl && "set G
   assert.equal(rev.type, "reversal");
   assert.equal((await gb.transactions.get(t.transaction.id)).status, "reversed");
 
+  // Fees: a ₦50 + 1% transfer fee (max ₦500) set up with the developer credential,
+  // and a ₦50 levy from ₦10,000 set up with the game key.
+  const cfg = mgmt.game(game.id, "sandbox");
+  const fee = await cfg.fees.create(bank.id, {
+    code: "transfer_fee", name: "Transfer fee", event: "transfer", model: "combined", fixed_minor: 50_00, percentage_bps: 100, max_fee_minor: 500_00,
+  });
+  assert.equal(fee.state, "in_effect");
+  assert.equal(fee.credit_account, "fee_income");
+  const levy = await gb.fees.create(bank.id, { code: "stamp_duty", name: "Stamp duty", event: "transfer", kind: "levy", model: "fixed", fixed_minor: 50_00, min_amount_minor: 10_000_00 });
+  assert.equal(levy.credit_account, "levies_payable");
+  assert.equal((await gb.fees.list(bank.id)).length, 2);
+
+  const quote = await gb.fees.quote({ bank_id: bank.id, amount_minor: 1_000_00 });
+  assert.equal(quote.fees_total_minor, 60_00); // ₦50 + 1% of ₦1,000; below the levy's ₦10,000
+  const before = (await gb.accounts.balance(adaAcct.id)).posted_balance;
+  const pay = { source_account_id: adaAcct.id, destination_account_id: tundeAcct.id, amount_minor: 1_000_00, max_fee_minor: quote.fees_total_minor };
+  const paid = await gb.transfers.create(pay);
+  assert.equal(paid.fees_total_minor, 60_00);
+  assert.equal(paid.total_debit_minor, 1_060_00);
+  assert.equal(paid.source_balance.posted_balance, before - 1_060_00);
+  assert.deepEqual(paid.transaction.entries.map((e) => e.kind).sort(), ["fee", "fee", "principal", "principal"]);
+  const latest = (await gb.accounts.transactions(adaAcct.id, { limit: 2 })).data;
+  assert.ok(latest.some((l) => l.kind === "fee" && l.narration === "Transfer fee"), "the fee is its own labelled statement line");
+
+  // The schedule changes after the player saw the quote: the engine refuses rather than charge more.
+  await cfg.fees.update(bank.id, fee.id, { fixed_minor: 60_00 });
+  await assert.rejects(gb.transfers.create(pay), (e: unknown) => e instanceof FeeChangedError && e instanceof ConflictError && e.code === "fee_changed");
+
+  // The bank's books, and a reversal that refunds the fee.
+  assert.equal((await gb.banks.books(bank.id)).fee_income_minor, 60_00);
+  await gb.transactions.reverse(paid.transaction.id, { reason: "refund" });
+  assert.equal((await gb.banks.books(bank.id)).fee_income_minor, 0);
+  assert.equal((await cfg.fees.update(bank.id, fee.id, { status: "inactive" })).state, "inactive");
+
   // Clock and integrity.
   await gb.clock.configure({ mode: "manual" });
   const adv = await gb.clock.advance({ days: 1 });
   assert.notEqual(adv.clock.game_day, undefined);
   const recon = await gb.reconcile();
   assert.equal(recon.ok, true, JSON.stringify(recon.differences));
+
+  // Renaming and deleting a game. Deleting revokes its keys at once.
+  assert.equal((await mgmt.games.update(game.id, { name: "TS Game renamed" })).name, "TS Game renamed");
+  await mgmt.games.delete(game.id);
+  await assert.rejects(mgmt.games.get(game.id), NotFoundError);
+  await assert.rejects(gb.clock.get(), AuthenticationError);
 });
