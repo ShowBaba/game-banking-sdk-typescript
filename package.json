@@ -1,0 +1,26 @@
+{
+  "name": "@gamebanking/sdk",
+  "version": "0.1.0",
+  "description": "Server-side SDK for the Game Banking Engine API",
+  "license": "UNLICENSED",
+  "repository": { "type": "git", "url": "git+https://github.com/ShowBaba/game-banking-sdk-typescript.git" },
+  "homepage": "https://github.com/ShowBaba/game-banking-sdk-typescript#readme",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" }
+  },
+  "files": ["dist", "README.md"],
+  "engines": { "node": ">=18" },
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.test.json --noEmit",
+    "test": "rm -rf .test-build && tsc -p tsconfig.test.json && node --test .test-build/test/"
+  },
+  "devDependencies": {
+    "@types/node": "^20.16.0",
+    "typescript": "^5.9.0"
+  }
+}
