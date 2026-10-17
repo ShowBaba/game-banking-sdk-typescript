@@ -1,14 +1,42 @@
 // Contract test: the PRD §16.2 journey against a real engine.
 // Runs only when GBE_BASE_URL is set, e.g. GBE_BASE_URL=http://localhost:8080 npm test
 import assert from "node:assert/strict";
+import { createServer, type IncomingHttpHeaders } from "node:http";
+import type { AddressInfo } from "node:net";
 import { test } from "node:test";
 import {
   AuthenticationError, ConflictError, FeeChangedError, GameBank, GameBankManagement, InsufficientFundsError, NotFoundError,
-  PermissionDeniedError, type ResponseInfo, type Scope,
+  PenaltyChangedError, PermissionDeniedError, type ResponseInfo, type Scope, verifyWebhook,
 } from "../src/index.js";
 
 const baseUrl = process.env.GBE_BASE_URL;
-const ALL_SCOPES: Scope[] = ["bank:read", "bank:write", "account:read", "account:write", "transfer:create", "funding:create", "transaction:reverse", "limits:write"];
+const ALL_SCOPES: Scope[] = ["bank:read", "bank:write", "account:read", "account:write", "transfer:create", "funding:create", "transaction:reverse", "limits:write", "webhooks:read", "webhooks:write",
+  "merchants:write", "cards:read", "cards:write", "cards:charge", "deposits:write"];
+// Where the engine can reach this test's webhook receiver (the engine runs in Docker in CI and locally).
+const receiverHost = process.env.GBE_WEBHOOK_RECEIVER_HOST ?? "host.docker.internal";
+
+/** A local webhook receiver that keeps each raw delivery. */
+async function startReceiver() {
+  const got: { headers: IncomingHttpHeaders; body: Buffer }[] = [];
+  const server = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (c: Buffer) => chunks.push(c));
+    req.on("end", () => {
+      got.push({ headers: req.headers, body: Buffer.concat(chunks) });
+      res.writeHead(204).end();
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "0.0.0.0", resolve));
+  const waitFor = async (pred: (b: { headers: IncomingHttpHeaders; body: Buffer }) => boolean) => {
+    for (let i = 0; i < 100; i++) {
+      const hit = got.find(pred);
+      if (hit) return hit;
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    throw new Error("no matching webhook delivery within 20s");
+  };
+  return { url: `http://${receiverHost}:${(server.address() as AddressInfo).port}/hooks`, got, waitFor, close: () => server.close() };
+}
 const uniq = () => `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
 
 test("PRD §16.2 journey through the TypeScript SDK", { skip: !baseUrl && "set GBE_BASE_URL to run against an engine" }, async () => {
@@ -142,12 +170,124 @@ test("PRD §16.2 journey through the TypeScript SDK", { skip: !baseUrl && "set G
   assert.equal((await gb.banks.books(bank.id)).fee_income_minor, 0);
   assert.equal((await cfg.fees.update(bank.id, fee.id, { status: "inactive" })).state, "inactive");
 
+  // Webhooks: a debit alert reaches a real endpoint, signed, and verifies with the SDK helper.
+  assert.equal((await mgmt.game(game.id, "sandbox").webhooks.endpoints.list()).length, 0, "developer credentials can manage webhooks");
+  await assert.rejects(new GameBank({ apiKey: readOnly.secret!, baseUrl }).webhooks.endpoints.list(), PermissionDeniedError);
+  const receiver = await startReceiver();
+  try {
+    const ep = await gb.webhooks.endpoints.create({ url: receiver.url, event_types: ["account.debited"], description: "contract" });
+    assert.ok(ep.secret?.startsWith("whsec_") && ep.secret.startsWith(ep.secret_prefix));
+    assert.equal((await gb.webhooks.endpoints.get(ep.id)).secret, undefined, "the secret is shown once");
+    const probe = await gb.webhooks.endpoints.test(ep.id);
+    assert.equal(probe.state, "delivered", probe.last_error ?? "");
+
+    const sent = await gb.transfers.create({ source_account_id: adaAcct.id, destination_account_id: tundeAcct.id, amount_minor: 5_00, narration: "Webhook check" });
+    const hit = await receiver.waitFor((d) => d.body.includes(sent.transaction.id));
+    const event = verifyWebhook(hit.body, hit.headers["gbe-signature"] as string, ep.secret!);
+    assert.equal(event.type, "account.debited");
+    if (event.type !== "account.debited") throw new Error("unreachable");
+    assert.equal(event.data.account_id, adaAcct.id);
+    assert.equal(event.data.total_minor, 5_00);
+    assert.equal(event.data.counterparty?.account_name, "Tunde Bello");
+    assert.equal(event.data.balance_after.posted_minor, sent.source_balance.posted_balance);
+    assert.equal(hit.headers["gbe-event-id"], event.id);
+
+    // The event log, its deliveries, rotation and redelivery.
+    const feed = await gb.webhooks.events.list({ type: "account.debited", account_id: adaAcct.id, limit: 1 });
+    assert.equal(feed.data[0]?.id, event.id);
+    assert.equal((await gb.webhooks.events.get(event.id)).id, event.id);
+    const [delivery] = await gb.webhooks.events.deliveries(event.id);
+    assert.equal(delivery?.state, "delivered");
+    const rotated = await gb.webhooks.endpoints.rotateSecret(ep.id);
+    assert.ok(rotated.secret && rotated.secret !== ep.secret && rotated.previous_secret_expires_at);
+    const before = receiver.got.length;
+    await gb.webhooks.events.redeliver(event.id, { endpoint_id: ep.id });
+    const again = await receiver.waitFor((d) => receiver.got.indexOf(d) >= before);
+    verifyWebhook(again.body, again.headers["gbe-signature"] as string, rotated.secret!);
+    verifyWebhook(again.body, again.headers["gbe-signature"] as string, ep.secret!); // both sign during the overlap
+
+    assert.equal((await gb.webhooks.endpoints.update(ep.id, { status: "disabled" })).status, "disabled");
+    await gb.webhooks.endpoints.delete(ep.id);
+    await assert.rejects(gb.webhooks.endpoints.get(ep.id), NotFoundError);
+  } finally {
+    receiver.close();
+  }
+
+  // Merchants and cards: a shop with a merchant account, a card, a payment, a refund, a lost card.
+  const shop = await gb.merchants.create({ external_merchant_id: `shop-${uniq()}`, name: "Mama Put", category: "food" });
+  assert.equal((await gb.merchants.create({ external_merchant_id: shop.external_merchant_id, name: "x" })).id, shop.id, "merchants are idempotent");
+  const till = await gb.accounts.open({ bank_id: bank.id, merchant_id: shop.id });
+  assert.equal(till.owner_type, "merchant");
+  assert.equal(till.merchant_id, shop.id);
+  await cfg.banks.update(bank.id, { feature_flags: { cards: true } });
+  const program = await cfg.cardPrograms.create(bank.id, { name: "Classic", daily_limit_minor: 3_000_00 });
+  assert.equal(program.bin.length, 6);
+  const issued = await gb.cards.issue({ account_id: adaAcct.id, name_on_card: "Ada Obi" });
+  assert.equal(issued.card_number.length, 16);
+  assert.equal(issued.card.masked_number, `${issued.card_number.slice(0, 6)}******${issued.card_number.slice(12)}`);
+  assert.equal((await gb.cards.get(issued.card.id)).status, "active");
+
+  const spendable = (await gb.accounts.balance(adaAcct.id)).available_balance;
+  const auth = await gb.cardAuthorizations.authorize({
+    card_number: issued.card_number, expiry_month: issued.card.expiry_month, expiry_year: issued.card.expiry_year, cvv: issued.cvv,
+    merchant_account_number: till.account_number, amount_minor: 200_00, capture: false, description: "Jollof",
+  });
+  assert.equal(auth.authorization.status, "approved");
+  assert.equal(auth.balance.available_balance, spendable - 200_00);
+  const captured = await gb.cardAuthorizations.capture(auth.authorization.id, { amount_minor: 150_00 });
+  assert.equal(captured.transaction.type, "card_payment");
+  assert.equal(captured.merchant_balance.posted_balance, 150_00);
+  assert.equal(captured.card_balance.available_balance, spendable - 150_00, "the uncaptured ₦50 is released");
+  const refunded = await gb.cardAuthorizations.refund(auth.authorization.id, { amount_minor: 50_00, reason: "cold" });
+  assert.equal(refunded.transaction.type, "card_refund");
+  assert.equal(refunded.authorization.refunded_minor, 50_00);
+
+  // By default a payment is approved and captured in the same call.
+  const instant = await gb.cardAuthorizations.authorize({ card_id: issued.card.id, merchant_account_id: till.id, amount_minor: 20_00 });
+  assert.equal(instant.authorization.status, "captured");
+  assert.equal(instant.transaction?.type, "card_payment");
+  assert.equal(instant.merchant_balance?.posted_balance, 120_00);
+
+  // Declines are results, not errors; a payment approved before a card is lost still captures.
+  const pending = await gb.cardAuthorizations.authorize({ card_id: issued.card.id, merchant_account_id: till.id, amount_minor: 10_00, capture: false });
+  assert.equal((await gb.cards.reportLost(issued.card.id, { reason: "stolen" })).status, "stolen");
+  const refused = await gb.cardAuthorizations.authorize({ card_id: issued.card.id, merchant_account_id: till.id, amount_minor: 10_00 });
+  assert.equal(refused.authorization.status, "declined");
+  assert.equal(refused.authorization.decline_code, "card_stolen");
+  assert.equal((await gb.cardAuthorizations.capture(pending.authorization.id)).authorization.status, "captured");
+  assert.equal((await gb.cards.list({ account_id: adaAcct.id })).length, 1, "no replacement card");
+  assert.equal((await gb.cardAuthorizations.list({ card_id: issued.card.id })).length, 4);
+
   // Clock and integrity.
   await gb.clock.configure({ mode: "manual" });
   const adv = await gb.clock.advance({ days: 1 });
   assert.notEqual(adv.clock.game_day, undefined);
   const recon = await gb.reconcile();
   assert.equal(recon.ok, true, JSON.stringify(recon.differences));
+
+  // Savings: ₦100,000 at 36.5% earns ₦100 a game day; a fixed deposit can be broken early.
+  await cfg.banks.update(bank.id, { feature_flags: { savings: true } });
+  const saver = await cfg.depositProducts.create(bank.id, { code: "easy_saver", name: "Easy Saver", kind: "savings", rate_tiers: [{ from_minor: 0, rate_bps: 3650 }] });
+  const term = await cfg.depositProducts.create(bank.id, {
+    code: "term", name: "Term Deposit", kind: "fixed_deposit", terms: [{ days: 30, rate_bps: 3650 }], early_forfeit_bps: 10_000, early_penalty_fixed_minor: 100_00,
+  });
+  const savings = await gb.accounts.open({ bank_id: bank.id, player_id: ada.id, product_id: saver.id });
+  assert.equal(savings.account_type, "savings");
+  await gb.funding.create({ account_id: savings.id, amount_minor: 100_000_00, reason: "savings", reference: `save-${uniq()}` });
+  await gb.funding.create({ account_id: adaAcct.id, amount_minor: 100_000_00, reason: "deposit", reference: `fd-${uniq()}` });
+  const fd = await gb.fixedDeposits.open({ source_account_id: adaAcct.id, product_id: term.id, term_days: 30, amount_minor: 100_000_00 });
+  assert.equal(fd.fixed_deposit.status, "active");
+  assert.equal((await gb.depositProducts.quote({ product_id: term.id, amount_minor: 100_000_00, term_days: 30 })).gross_interest_minor, 3_000_00);
+  await gb.clock.advance({ days: 2 });
+  const position = await gb.accounts.interest(savings.id);
+  assert.equal(position.accrued_interest_minor, 200_00);
+  assert.equal(position.rate_bps, 3650);
+  const bq = await gb.fixedDeposits.breakQuote(fd.fixed_deposit.id);
+  assert.equal(bq.accrued_interest_minor, 200_00);
+  assert.equal(bq.payout_minor, 100_000_00 - 100_00, "all interest forfeited, ₦100 penalty");
+  await assert.rejects(gb.fixedDeposits.break(fd.fixed_deposit.id, { max_penalty_minor: 50_00 }), PenaltyChangedError);
+  assert.equal((await gb.fixedDeposits.break(fd.fixed_deposit.id, { max_penalty_minor: bq.penalty_minor })).fixed_deposit.status, "broken");
+  assert.equal((await gb.banks.books(bank.id)).accrued_interest_minor >= 200_00, true);
 
   // Renaming and deleting a game. Deleting revokes its keys at once.
   assert.equal((await mgmt.games.update(game.id, { name: "TS Game renamed" })).name, "TS Game renamed");

@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
-  ConflictError, ConnectionError, FeeChangedError, GameBank, GameBankError, InsufficientFundsError, RateLimitError, ServerError,
-  formatMinor, toMinor,
+  ConflictError, ConnectionError, FeeChangedError, PenaltyChangedError, GameBank, GameBankError, InsufficientFundsError, RateLimitError, ServerError,
+  WebhookVerificationError, formatMinor, toMinor, verifyWebhook,
 } from "../src/index.js";
+import { createHmac } from "node:crypto";
 
 type Call = { url: string; method: string; headers: Record<string, string>; body: string | undefined };
 type Reply = { status: number; body?: unknown; headers?: Record<string, string> } | Error;
@@ -178,5 +179,114 @@ describe("money", () => {
     assert.throws(() => toMinor("1.005", 2), RangeError);
     assert.throws(() => toMinor("abc", 2), RangeError);
     assert.throws(() => toMinor("99999999999999999", 2), RangeError);
+  });
+});
+
+describe("verifyWebhook", () => {
+  // The engine's published test vector (docs/webhooks.md).
+  const body = '{"hello":"world"}';
+  const vector = "f592bbf3951cfc94e560eecfb5d9dd4da6b0fff2e626235f8ab4b54860925d0b";
+  const now = 1_700_000_010;
+  const sign = (secret: string, t: number, b: string) => createHmac("sha256", secret).update(`${t}.${b}`).digest("hex");
+  const reason = (fn: () => unknown) => {
+    try {
+      fn();
+    } catch (e) {
+      assert.ok(e instanceof WebhookVerificationError);
+      return e.reason;
+    }
+    assert.fail("expected a WebhookVerificationError");
+  };
+
+  it("accepts the engine's test vector and returns the parsed event", () => {
+    assert.deepEqual(verifyWebhook(body, `t=1700000000,v1=${vector}`, "whsec_test", { now }), { hello: "world" });
+    assert.deepEqual(verifyWebhook(new TextEncoder().encode(body), `t=1700000000,v1=${vector}`, "whsec_test", { now }), { hello: "world" });
+  });
+  it("accepts any matching v1 signature, and any of several secrets", () => {
+    const h = `t=1700000000,v1=${sign("whsec_new", 1_700_000_000, body)},v1=${vector}`;
+    verifyWebhook(body, h, "whsec_new", { now });
+    verifyWebhook(body, h, "whsec_test", { now });
+    verifyWebhook(body, `t=1700000000,v1=${vector}`, ["whsec_other", "whsec_test"], { now });
+  });
+  it("rejects tampering, wrong secrets, replays and bad headers", () => {
+    assert.equal(reason(() => verifyWebhook('{"hello":"world!"}', `t=1700000000,v1=${vector}`, "whsec_test", { now })), "no_matching_signature");
+    assert.equal(reason(() => verifyWebhook(body, `t=1700000000,v1=${vector}`, "whsec_wrong", { now })), "no_matching_signature");
+    assert.equal(reason(() => verifyWebhook(body, `t=1700000000,v1=${vector}`, "whsec_test", { now: 1_700_000_301 })), "timestamp_out_of_tolerance");
+    assert.equal(reason(() => verifyWebhook(body, `t=1700000000,v1=${vector}`, "whsec_test", { now: 1_699_999_000 })), "timestamp_out_of_tolerance");
+    verifyWebhook(body, `t=1700000000,v1=${vector}`, "whsec_test", { now: 1_700_000_900, toleranceSeconds: 1_000 });
+    assert.equal(reason(() => verifyWebhook(body, `v1=${vector}`, "whsec_test", { now })), "malformed_header");
+    assert.equal(reason(() => verifyWebhook(body, undefined, "whsec_test", { now })), "malformed_header");
+    assert.equal(reason(() => verifyWebhook(body, "t=1700000000", "whsec_test", { now })), "malformed_header");
+    const notJson = "plain text";
+    assert.equal(reason(() => verifyWebhook(notJson, `t=1700000000,v1=${sign("s", 1_700_000_000, notJson)}`, "s", { now })), "invalid_payload");
+  });
+});
+
+describe("webhooks resource", () => {
+  it("calls the webhook routes", async () => {
+    const { fn, calls } = fakeFetch([
+      { status: 201, body: { id: "e1", secret: "whsec_x" } },
+      { status: 200, body: { data: [{ id: "ev1" }], next_cursor: "c2", has_more: true } },
+      { status: 200, body: { data: [{ id: "ev2" }], next_cursor: null, has_more: false } },
+      { status: 202, body: { data: [] } },
+      { status: 204 },
+    ]);
+    const gb = client(fn);
+    assert.equal((await gb.webhooks.endpoints.create({ url: "https://hooks.example.com", event_types: ["account.debited"] })).secret, "whsec_x");
+    const ids: string[] = [];
+    for await (const ev of gb.webhooks.events.iterate({ type: "account.debited", account_id: "a1" })) ids.push(ev.id);
+    await gb.webhooks.events.redeliver("ev1", { endpoint_id: "e1" });
+    await gb.webhooks.endpoints.delete("e1");
+    assert.deepEqual(ids, ["ev1", "ev2"]);
+    assert.deepEqual(calls.map((c) => `${c.method} ${new URL(c.url).pathname}${new URL(c.url).search}`), [
+      "POST /v1/webhooks/endpoints",
+      "GET /v1/webhooks/events?type=account.debited&account_id=a1",
+      "GET /v1/webhooks/events?type=account.debited&account_id=a1&cursor=c2",
+      "POST /v1/webhooks/events/ev1/redeliver",
+      "DELETE /v1/webhooks/endpoints/e1",
+    ]);
+    assert.deepEqual(JSON.parse(calls[0]!.body!), { url: "https://hooks.example.com", event_types: ["account.debited"] });
+  });
+});
+
+describe("cards", () => {
+  it("returns a declined authorization instead of throwing, and calls the card routes", async () => {
+    const declined = { authorization: { id: "a1", status: "declined", decline_code: "card_blocked" }, fees: [], fees_total_minor: 0, balance: {} };
+    const { fn, calls } = fakeFetch([
+      { status: 201, body: declined },
+      { status: 200, body: { id: "c1", status: "stolen" } },
+      { status: 201, body: { refund: { id: "r1" } } },
+      { status: 201, body: { id: "m1" } },
+    ]);
+    const gb = client(fn);
+    const r = await gb.cardAuthorizations.authorize({ card_id: "c1", merchant_account_id: "ma1", amount_minor: 500 });
+    assert.equal(r.authorization.decline_code, "card_blocked");
+    await gb.cards.reportLost("c1", { reason: "stolen" });
+    await gb.cardAuthorizations.refund("a1", { amount_minor: 100 });
+    await gb.merchants.create({ external_merchant_id: "shop-1", name: "Shop" });
+    assert.deepEqual(calls.map((c) => `${c.method} ${new URL(c.url).pathname}`), [
+      "POST /v1/card-authorizations", "POST /v1/cards/c1/report-lost", "POST /v1/card-authorizations/a1/refunds", "POST /v1/merchants",
+    ]);
+    assert.ok(calls[0]!.headers["Idempotency-Key"], "authorize is a money call with an idempotency key");
+    assert.ok(calls[2]!.headers["Idempotency-Key"], "refund is a money call with an idempotency key");
+    await assert.rejects(gb.cardAuthorizations.authorize({ card_id: "c1", amount_minor: 1.5 }), /amount_minor/);
+  });
+});
+
+describe("savings", () => {
+  it("maps penalty_changed and calls the deposit routes", async () => {
+    const { fn, calls } = fakeFetch([
+      { status: 200, body: { account_id: "s1", accrued_interest_minor: 5 } },
+      { status: 201, body: { fixed_deposit: { id: "f1" } } },
+      err(409, "penalty_changed", { quote: {} }),
+    ]);
+    const gb = client(fn);
+    assert.equal((await gb.accounts.interest("s1")).accrued_interest_minor, 5);
+    await gb.fixedDeposits.open({ source_account_id: "a1", product_id: "p1", term_days: 30, amount_minor: 1000 });
+    await assert.rejects(gb.fixedDeposits.break("f1", { max_penalty_minor: 1 }), (e: unknown) => e instanceof PenaltyChangedError && e instanceof ConflictError);
+    assert.deepEqual(calls.map((c) => `${c.method} ${new URL(c.url).pathname}`), [
+      "GET /v1/accounts/s1/interest", "POST /v1/fixed-deposits", "POST /v1/fixed-deposits/f1/break",
+    ]);
+    assert.ok(calls[1]!.headers["Idempotency-Key"] && calls[2]!.headers["Idempotency-Key"]);
   });
 });

@@ -36,6 +36,11 @@ export class ConflictError extends GameBankError {}
  * details.fees lists the current charges; get a new quote.
  */
 export class FeeChangedError extends ConflictError {}
+/**
+ * 409 penalty_changed: breaking a fixed deposit would cost more than the
+ * request's max_penalty_minor. details.quote has the current figures.
+ */
+export class PenaltyChangedError extends ConflictError {}
 /** 400, 413, 415: the request itself is invalid. */
 export class InvalidRequestError extends GameBankError {}
 /** 422 business rule failure, e.g. account_frozen, hold_not_active. */
@@ -58,7 +63,11 @@ export function errorFor(init: ConstructorParameters<typeof GameBankError>[0]): 
   if (status === 401) return new AuthenticationError(init);
   if (status === 403) return new PermissionDeniedError(init);
   if (status === 404) return new NotFoundError(init);
-  if (status === 409) return code === "fee_changed" ? new FeeChangedError(init) : new ConflictError(init);
+  if (status === 409) {
+    if (code === "fee_changed") return new FeeChangedError(init);
+    if (code === "penalty_changed") return new PenaltyChangedError(init);
+    return new ConflictError(init);
+  }
   if (status === 429) return new RateLimitError(init);
   if (status === 422) {
     if (code === "insufficient_funds") return new InsufficientFundsError(init);

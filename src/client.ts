@@ -58,6 +58,10 @@ export class Accounts extends Resource {
       cursor = page.next_cursor ?? undefined;
     } while (cursor);
   }
+  /** A savings or fixed-deposit account's rate, accrued interest, next payout and recent payouts. */
+  interest(accountId: string, ro?: RequestOptions) {
+    return this.t.request<T.AccountInterest>({ method: "GET", path: `/v1/accounts/${enc(accountId)}/interest` }, ro);
+  }
   async holds(accountId: string, params: { status?: T.Hold["status"] } = {}, ro?: RequestOptions): Promise<T.Hold[]> {
     const r = await this.t.request<{ data: T.Hold[] }>({ method: "GET", path: `/v1/accounts/${enc(accountId)}/holds`, query: params }, ro);
     return r.data;
@@ -188,6 +192,221 @@ export class GameClock extends Resource {
   }
 }
 
+export class DepositProducts extends Resource {
+  async list(bankId: string, ro?: RequestOptions): Promise<T.DepositProduct[]> {
+    return (await this.t.request<{ data: T.DepositProduct[] }>({ method: "GET", path: `/v1/banks/${enc(bankId)}/deposit-products` }, ro)).data;
+  }
+  get(bankId: string, productId: string, ro?: RequestOptions) {
+    return this.t.request<T.DepositProduct>({ method: "GET", path: `/v1/banks/${enc(bankId)}/deposit-products/${enc(productId)}` }, ro);
+  }
+  /** Adds a savings or fixed-deposit product. Needs bank:write; turn on the bank's "savings" flag to open accounts. */
+  create(bankId: string, params: T.DepositProductParams, ro?: RequestOptions) {
+    return this.t.request<T.DepositProduct>({ method: "POST", path: `/v1/banks/${enc(bankId)}/deposit-products`, body: params }, ro);
+  }
+  /** Changes a product (bumps its version). code and kind can't change. */
+  update(bankId: string, productId: string, params: T.DepositProductParams, ro?: RequestOptions) {
+    return this.t.request<T.DepositProduct>({ method: "PATCH", path: `/v1/banks/${enc(bankId)}/deposit-products/${enc(productId)}`, body: params }, ro);
+  }
+  /** Projects the interest an amount would earn. */
+  async quote(params: T.DepositQuoteParams, ro?: RequestOptions): Promise<T.DepositQuote> {
+    checkAmount(params, true);
+    return this.t.request<T.DepositQuote>({ method: "POST", path: "/v1/deposit-products/quote", body: params }, ro);
+  }
+}
+
+export class FixedDeposits extends Resource {
+  /** Books a fixed deposit from a player's account at the term's current rate. Needs deposits:write. */
+  async open(params: T.OpenFixedDepositParams, ro?: RequestOptions): Promise<T.OpenFixedDepositResult> {
+    checkAmount(params, true);
+    return this.t.request<T.OpenFixedDepositResult>({ method: "POST", path: "/v1/fixed-deposits", body: params, idempotent: true }, ro);
+  }
+  async list(params: T.ListFixedDepositsParams = {}, ro?: RequestOptions): Promise<T.FixedDeposit[]> {
+    return (await this.t.request<{ data: T.FixedDeposit[] }>({ method: "GET", path: "/v1/fixed-deposits", query: { ...params } }, ro)).data;
+  }
+  get(depositId: string, ro?: RequestOptions) {
+    return this.t.request<T.FixedDeposit>({ method: "GET", path: `/v1/fixed-deposits/${enc(depositId)}` }, ro);
+  }
+  /** Changes what happens at maturity. */
+  update(depositId: string, params: { maturity_instruction: T.MaturityInstruction }, ro?: RequestOptions) {
+    return this.t.request<T.FixedDeposit>({ method: "PATCH", path: `/v1/fixed-deposits/${enc(depositId)}`, body: params }, ro);
+  }
+  /** What breaking the deposit early pays now. */
+  breakQuote(depositId: string, ro?: RequestOptions) {
+    return this.t.request<T.BreakQuote>({ method: "GET", path: `/v1/fixed-deposits/${enc(depositId)}/break-quote` }, ro);
+  }
+  /** Breaks the deposit early. Pass the quote's penalty_minor as max_penalty_minor (PenaltyChangedError if it rose). */
+  break(depositId: string, params: { max_penalty_minor?: number } = {}, ro?: RequestOptions) {
+    return this.t.request<T.BreakFixedDepositResult>({ method: "POST", path: `/v1/fixed-deposits/${enc(depositId)}/break`, body: params, idempotent: true }, ro);
+  }
+}
+
+export class Merchants extends Resource {
+  /** Registers a merchant (an NPC shop or a player-run store). Repeat calls with the same external_merchant_id return it. Needs merchants:write. */
+  create(params: T.CreateMerchantParams, ro?: RequestOptions) {
+    return this.t.request<T.Merchant>({ method: "POST", path: "/v1/merchants", body: params, retrySafe: true }, ro);
+  }
+  async list(params: T.ListMerchantsParams = {}, ro?: RequestOptions): Promise<T.Merchant[]> {
+    return (await this.t.request<{ data: T.Merchant[] }>({ method: "GET", path: "/v1/merchants", query: { ...params } }, ro)).data;
+  }
+  get(merchantId: string, ro?: RequestOptions) {
+    return this.t.request<T.Merchant>({ method: "GET", path: `/v1/merchants/${enc(merchantId)}` }, ro);
+  }
+  /** Renames, recategorises, suspends or reactivates a merchant. */
+  update(merchantId: string, params: T.UpdateMerchantParams, ro?: RequestOptions) {
+    return this.t.request<T.Merchant>({ method: "PATCH", path: `/v1/merchants/${enc(merchantId)}`, body: params }, ro);
+  }
+}
+
+export class CardPrograms extends Resource {
+  async list(bankId: string, ro?: RequestOptions): Promise<T.CardProgram[]> {
+    return (await this.t.request<{ data: T.CardProgram[] }>({ method: "GET", path: `/v1/banks/${enc(bankId)}/card-programs` }, ro)).data;
+  }
+  get(bankId: string, programId: string, ro?: RequestOptions) {
+    return this.t.request<T.CardProgram>({ method: "GET", path: `/v1/banks/${enc(bankId)}/card-programs/${enc(programId)}` }, ro);
+  }
+  /** Adds a card program. Turn on the bank's "cards" feature flag to issue cards. Needs bank:write. */
+  create(bankId: string, params: T.CardProgramParams, ro?: RequestOptions) {
+    return this.t.request<T.CardProgram>({ method: "POST", path: `/v1/banks/${enc(bankId)}/card-programs`, body: params }, ro);
+  }
+  update(bankId: string, programId: string, params: T.CardProgramParams, ro?: RequestOptions) {
+    return this.t.request<T.CardProgram>({ method: "PATCH", path: `/v1/banks/${enc(bankId)}/card-programs/${enc(programId)}`, body: params }, ro);
+  }
+}
+
+export class Cards extends Resource {
+  /**
+   * Issues a debit card on a player account, charging any card_issuance fee.
+   * The result's card_number and cvv are shown only now. Needs cards:write.
+   */
+  issue(params: T.IssueCardParams, ro?: RequestOptions) {
+    return this.t.request<T.IssueCardResult>({ method: "POST", path: "/v1/cards", body: params, idempotent: true }, ro);
+  }
+  async list(params: T.ListCardsParams = {}, ro?: RequestOptions): Promise<T.Card[]> {
+    return (await this.t.request<{ data: T.Card[] }>({ method: "GET", path: "/v1/cards", query: { ...params } }, ro)).data;
+  }
+  get(cardId: string, ro?: RequestOptions) {
+    return this.t.request<T.Card>({ method: "GET", path: `/v1/cards/${enc(cardId)}` }, ro);
+  }
+  /** Changes the name on the card or its own limits. */
+  update(cardId: string, params: T.UpdateCardParams, ro?: RequestOptions) {
+    return this.t.request<T.Card>({ method: "PATCH", path: `/v1/cards/${enc(cardId)}`, body: params }, ro);
+  }
+  /** Pauses the card: new payments are declined (card_blocked). */
+  block(cardId: string, params: { reason?: string } = {}, ro?: RequestOptions) {
+    return this.t.request<T.Card>({ method: "POST", path: `/v1/cards/${enc(cardId)}/block`, body: params }, ro);
+  }
+  unblock(cardId: string, ro?: RequestOptions) {
+    return this.t.request<T.Card>({ method: "POST", path: `/v1/cards/${enc(cardId)}/unblock` }, ro);
+  }
+  /** Reports the card lost or stolen: final, and no replacement is issued. Approved payments still capture. */
+  reportLost(cardId: string, params: { reason?: "lost" | "stolen" } = {}, ro?: RequestOptions) {
+    return this.t.request<T.Card>({ method: "POST", path: `/v1/cards/${enc(cardId)}/report-lost`, body: params }, ro);
+  }
+  close(cardId: string, params: { reason?: string } = {}, ro?: RequestOptions) {
+    return this.t.request<T.Card>({ method: "POST", path: `/v1/cards/${enc(cardId)}/close`, body: params }, ro);
+  }
+}
+
+export class CardAuthorizations extends Resource {
+  /**
+   * Authorises a card payment at a merchant. A decline is not an error: check
+   * result.authorization.status ("declined") and decline_code. Needs cards:charge.
+   */
+  async authorize(params: T.AuthorizeCardParams, ro?: RequestOptions): Promise<T.AuthorizeCardResult> {
+    checkAmount(params, true);
+    return this.t.request<T.AuthorizeCardResult>({ method: "POST", path: "/v1/card-authorizations", body: params, idempotent: true }, ro);
+  }
+  async list(params: T.ListCardAuthorizationsParams = {}, ro?: RequestOptions): Promise<T.CardAuthorization[]> {
+    return (await this.t.request<{ data: T.CardAuthorization[] }>({ method: "GET", path: "/v1/card-authorizations", query: { ...params } }, ro)).data;
+  }
+  get(authorizationId: string, ro?: RequestOptions) {
+    return this.t.request<T.CardAuthorization>({ method: "GET", path: `/v1/card-authorizations/${enc(authorizationId)}` }, ro);
+  }
+  /** Settles all or part of an approved payment into the merchant account; the rest is released. */
+  async capture(authorizationId: string, params: T.CaptureCardParams = {}, ro?: RequestOptions): Promise<T.CaptureCardResult> {
+    checkAmount(params, false);
+    return this.t.request<T.CaptureCardResult>({ method: "POST", path: `/v1/card-authorizations/${enc(authorizationId)}/capture`, body: params, idempotent: true }, ro);
+  }
+  /** Cancels an approved payment and frees its funds. */
+  release(authorizationId: string, params: { reason?: string } = {}, ro?: RequestOptions) {
+    return this.t.request<{ authorization: T.CardAuthorization; balance: T.Balance }>(
+      { method: "POST", path: `/v1/card-authorizations/${enc(authorizationId)}/release`, body: params, idempotent: true }, ro);
+  }
+  /** Refunds all or part of a captured payment from the merchant account. Fees are not refunded. */
+  async refund(authorizationId: string, params: T.RefundCardParams = {}, ro?: RequestOptions): Promise<T.RefundCardResult> {
+    checkAmount(params, false);
+    return this.t.request<T.RefundCardResult>({ method: "POST", path: `/v1/card-authorizations/${enc(authorizationId)}/refunds`, body: params, idempotent: true }, ro);
+  }
+}
+
+export class WebhookEndpoints extends Resource {
+  /**
+   * Registers an endpoint. The result's `secret` is shown only now: store it
+   * and pass it to verifyWebhook. Needs webhooks:write.
+   */
+  create(params: T.CreateWebhookEndpointParams, ro?: RequestOptions) {
+    return this.t.request<T.WebhookEndpoint>({ method: "POST", path: "/v1/webhooks/endpoints", body: params }, ro);
+  }
+  async list(ro?: RequestOptions): Promise<T.WebhookEndpoint[]> {
+    return (await this.t.request<{ data: T.WebhookEndpoint[] }>({ method: "GET", path: "/v1/webhooks/endpoints" }, ro)).data;
+  }
+  get(endpointId: string, ro?: RequestOptions) {
+    return this.t.request<T.WebhookEndpoint>({ method: "GET", path: `/v1/webhooks/endpoints/${enc(endpointId)}` }, ro);
+  }
+  /** Changes the URL, description or event types, or pauses ({ status: "disabled" }) and re-enables it. */
+  update(endpointId: string, params: T.UpdateWebhookEndpointParams, ro?: RequestOptions) {
+    return this.t.request<T.WebhookEndpoint>({ method: "PATCH", path: `/v1/webhooks/endpoints/${enc(endpointId)}`, body: params }, ro);
+  }
+  delete(endpointId: string, ro?: RequestOptions) {
+    return this.t.request<void>({ method: "DELETE", path: `/v1/webhooks/endpoints/${enc(endpointId)}` }, ro);
+  }
+  /** Issues a new secret (in the result). The old one keeps signing for 24 hours. */
+  rotateSecret(endpointId: string, ro?: RequestOptions) {
+    return this.t.request<T.WebhookEndpoint>({ method: "POST", path: `/v1/webhooks/endpoints/${enc(endpointId)}/rotate-secret` }, ro);
+  }
+  /** Sends a webhook.test event now and returns how that attempt went. */
+  test(endpointId: string, ro?: RequestOptions) {
+    return this.t.request<T.WebhookDelivery>({ method: "POST", path: `/v1/webhooks/endpoints/${enc(endpointId)}/test` }, ro);
+  }
+}
+
+export class WebhookEvents extends Resource {
+  /** One page of the event log, newest first (kept 30 days). Also a polling feed. */
+  list(params: T.ListWebhookEventsParams = {}, ro?: RequestOptions) {
+    return this.t.request<T.Page<T.WebhookEvent>>({ method: "GET", path: "/v1/webhooks/events", query: { ...params } }, ro);
+  }
+  /** Every event matching the filter, newest first, fetching pages as needed. */
+  async *iterate(params: Omit<T.ListWebhookEventsParams, "cursor"> = {}, ro?: RequestOptions): AsyncGenerator<T.WebhookEvent> {
+    let cursor: string | undefined;
+    do {
+      const page = await this.list({ ...params, ...(cursor ? { cursor } : {}) }, ro);
+      yield* page.data;
+      cursor = page.next_cursor ?? undefined;
+    } while (cursor);
+  }
+  get(eventId: string, ro?: RequestOptions) {
+    return this.t.request<T.WebhookEvent>({ method: "GET", path: `/v1/webhooks/events/${enc(eventId)}` }, ro);
+  }
+  /** The event's deliveries, one per endpoint, with attempts and the last error. */
+  async deliveries(eventId: string, ro?: RequestOptions): Promise<T.WebhookDelivery[]> {
+    return (await this.t.request<{ data: T.WebhookDelivery[] }>({ method: "GET", path: `/v1/webhooks/events/${enc(eventId)}/deliveries` }, ro)).data;
+  }
+  /** Sends the event again, to one endpoint or every subscribed one. Retries start over. */
+  async redeliver(eventId: string, params: { endpoint_id?: string } = {}, ro?: RequestOptions): Promise<T.WebhookDelivery[]> {
+    return (await this.t.request<{ data: T.WebhookDelivery[] }>({ method: "POST", path: `/v1/webhooks/events/${enc(eventId)}/redeliver`, body: params }, ro)).data;
+  }
+}
+
+/** Signed event notifications (debit and credit alerts). Verify deliveries with verifyWebhook. */
+export class Webhooks {
+  readonly endpoints: WebhookEndpoints;
+  readonly events: WebhookEvents;
+  constructor(t: Transport) {
+    this.endpoints = new WebhookEndpoints(t);
+    this.events = new WebhookEvents(t);
+  }
+}
+
 /**
  * Runtime client for game servers, authenticated with a game API key.
  *
@@ -207,6 +426,13 @@ export class GameBank {
   readonly fees: Fees;
   readonly currencies: Currencies;
   readonly clock: GameClock;
+  readonly webhooks: Webhooks;
+  readonly merchants: Merchants;
+  readonly cardPrograms: CardPrograms;
+  readonly cards: Cards;
+  readonly cardAuthorizations: CardAuthorizations;
+  readonly depositProducts: DepositProducts;
+  readonly fixedDeposits: FixedDeposits;
   protected readonly transport: Transport;
 
   constructor(options: ClientOptions = {}, transport?: Transport) {
@@ -223,6 +449,13 @@ export class GameBank {
     this.fees = new Fees(t);
     this.currencies = new Currencies(t);
     this.clock = new GameClock(t);
+    this.webhooks = new Webhooks(t);
+    this.merchants = new Merchants(t);
+    this.cardPrograms = new CardPrograms(t);
+    this.cards = new Cards(t);
+    this.cardAuthorizations = new CardAuthorizations(t);
+    this.depositProducts = new DepositProducts(t);
+    this.fixedDeposits = new FixedDeposits(t);
   }
 
   /** Confirms a recipient before a transfer: returns only the account name and status. */
