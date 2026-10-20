@@ -410,12 +410,14 @@ export class Webhooks {
 /**
  * Runtime client for game servers, authenticated with a game API key.
  *
- *     const gb = new GameBank({ apiKey: process.env.GBE_API_KEY, baseUrl: "https://engine.example.com" });
+ *     const gb = new GameBank({ apiKey: process.env.GBE_API_KEY });
  *     const { transaction } = await gb.transfers.create({ source_account_id, destination_account_number, amount_minor: 1000 });
  */
 export class GameBank {
   /** "sandbox" or "production", read from the API key's prefix. */
   readonly environment: T.Environment | undefined;
+  /** The engine this client talks to. */
+  readonly baseUrl: string;
   readonly players: Players;
   readonly accounts: Accounts;
   readonly funding: Funding;
@@ -438,6 +440,7 @@ export class GameBank {
   constructor(options: ClientOptions = {}, transport?: Transport) {
     this.transport = transport ?? new Transport(options);
     this.environment = this.transport.environment;
+    this.baseUrl = this.transport.baseUrl;
     const t = this.transport;
     this.players = new Players(t);
     this.accounts = new Accounts(t);

@@ -3,10 +3,16 @@ import type { Environment } from "./types.js";
 
 export const VERSION = "0.5.0";
 
+/** The hosted engine. Override it with `baseUrl` or GBE_BASE_URL for a local or self-hosted engine. */
+export const DEFAULT_BASE_URL = "https://api.gamebank.dev";
+
 export interface ClientOptions {
   /** Game API key or developer credential. Defaults to the GBE_API_KEY environment variable. */
   apiKey?: string;
-  /** The engine's address, e.g. https://game-banking-engine.onrender.com. Defaults to GBE_BASE_URL. */
+  /**
+   * The engine's address. Defaults to GBE_BASE_URL, then the hosted engine at
+   * https://api.gamebank.dev. Set it only for a local or self-hosted engine.
+   */
   baseUrl?: string;
   /** Per-attempt timeout in milliseconds. Default 30 000. */
   timeout?: number;
@@ -106,8 +112,7 @@ export class Transport {
     }
     const token = opts.apiKey ?? env("GBE_API_KEY");
     if (!token) throw new GameBankError({ status: 0, code: "missing_api_key", message: "Pass apiKey or set GBE_API_KEY." });
-    const baseUrl = opts.baseUrl ?? env("GBE_BASE_URL");
-    if (!baseUrl) throw new GameBankError({ status: 0, code: "missing_base_url", message: "Pass baseUrl (your engine's address) or set GBE_BASE_URL." });
+    const baseUrl = opts.baseUrl || env("GBE_BASE_URL") || DEFAULT_BASE_URL;
     const fetchImpl = opts.fetch ?? globalThis.fetch;
     if (!fetchImpl) throw new GameBankError({ status: 0, code: "fetch_unavailable", message: "No global fetch: use Node.js 18+ or pass options.fetch." });
 

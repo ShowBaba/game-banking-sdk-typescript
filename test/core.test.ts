@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
-  ConflictError, ConnectionError, FeeChangedError, PenaltyChangedError, GameBank, GameBankError, InsufficientFundsError, RateLimitError, ServerError,
+  ConflictError, ConnectionError, DEFAULT_BASE_URL, FeeChangedError, PenaltyChangedError, GameBank, GameBankError, InsufficientFundsError, RateLimitError, ServerError,
   WebhookVerificationError, formatMinor, toMinor, verifyWebhook,
 } from "../src/index.js";
 import { createHmac } from "node:crypto";
@@ -51,16 +51,19 @@ describe("configuration", () => {
     }
   });
 
-  it("requires a key and a base URL, falling back to GBE_API_KEY and GBE_BASE_URL", () => {
+  it("requires a key; the base URL falls back to GBE_BASE_URL, then the hosted engine", () => {
     const saved = { key: process.env.GBE_API_KEY, url: process.env.GBE_BASE_URL };
     delete process.env.GBE_API_KEY;
     delete process.env.GBE_BASE_URL;
     try {
       assert.throws(() => new GameBank({ baseUrl: "http://e" }), (e: GameBankError) => e.code === "missing_api_key");
-      assert.throws(() => new GameBank({ apiKey: "gbe_test_sk_x" }), (e: GameBankError) => e.code === "missing_base_url");
+      assert.equal(new GameBank({ apiKey: "gbe_test_sk_x" }).baseUrl, DEFAULT_BASE_URL);
+      assert.equal(DEFAULT_BASE_URL, "https://api.gamebank.dev");
       process.env.GBE_API_KEY = "gbe_live_sk_env";
       process.env.GBE_BASE_URL = "http://from-env";
       assert.equal(new GameBank().environment, "production");
+      assert.equal(new GameBank().baseUrl, "http://from-env");
+      assert.equal(new GameBank({ baseUrl: "http://explicit/" }).baseUrl, "http://explicit");
     } finally {
       for (const [k, v] of [["GBE_API_KEY", saved.key], ["GBE_BASE_URL", saved.url]] as const) {
         if (v === undefined) delete process.env[k];

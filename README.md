@@ -3,8 +3,12 @@
 Server-side SDK for the Game Banking Engine. Node.js 18+ (also Bun and Deno), ESM, no runtime dependencies.
 
 > Game API keys move money. Use this SDK on your game servers only. It refuses to run in a browser.
+>
+> In-game money only: the Game Banking Engine simulates banking for game currencies. It holds no real money and isn't a regulated financial service, so don't use it for balances players can cash out or exchange for real money.
 
 ## Install
+
+From [npm](https://www.npmjs.com/package/@gamebanking/sdk):
 
 ```bash
 npm install @gamebanking/sdk
@@ -15,7 +19,7 @@ npm install @gamebanking/sdk
 ```ts
 import { GameBank, InsufficientFundsError } from "@gamebanking/sdk";
 
-const gb = new GameBank({ apiKey: process.env.GBE_API_KEY, baseUrl: "https://your-engine.example.com" });
+const gb = new GameBank({ apiKey: process.env.GBE_API_KEY }); // talks to https://api.gamebank.dev
 
 // Map your player, open an account, pay a salary.
 const player = await gb.players.upsert({ external_player_id: "user-42", display_name: "Ada Obi" });
@@ -143,7 +147,7 @@ app.post("/gbe/webhooks", express.raw({ type: "application/json" }), (req, res) 
 ```ts
 import { GameBankManagement } from "@gamebanking/sdk";
 
-const mgmt = new GameBankManagement({ apiKey: process.env.GBE_DEV_CREDENTIAL, baseUrl });
+const mgmt = new GameBankManagement({ apiKey: process.env.GBE_DEV_CREDENTIAL });
 const game = await mgmt.games.create({ name: "Lagos Hustle" });
 const key = await mgmt.apiKeys.issue(game.id, { environment: "sandbox", scopes: ["account:read", "account:write", "transfer:create"] });
 console.log(key.secret); // shown once
@@ -154,7 +158,7 @@ await mgmt.game(game.id, "sandbox").banks.create({ name: "Eko Trust Bank", base_
 
 ## Behaviour
 
-Retries, idempotency keys, error types and money helpers follow the shared contract in [`CONTRACT.md`](CONTRACT.md). Options: `apiKey`, `baseUrl`, `timeout` (ms), `maxRetries`, `onResponse`, `fetch`. Per call: `{ idempotencyKey, signal, timeout, maxRetries }`. `toMinor("100.50", 2)` and `formatMinor(10050, 2)` convert amounts without floating point.
+Retries, idempotency keys, error types and money helpers follow the shared contract in [`CONTRACT.md`](CONTRACT.md). Options: `apiKey` (default `GBE_API_KEY`), `baseUrl` (default `GBE_BASE_URL`, then the hosted engine `https://api.gamebank.dev`; set it only for a local or self-hosted engine, e.g. `http://localhost:8080`), `timeout` (ms), `maxRetries`, `onResponse`, `fetch`. Per call: `{ idempotencyKey, signal, timeout, maxRetries }`. `toMinor("100.50", 2)` and `formatMinor(10050, 2)` convert amounts without floating point.
 
 ## Development
 
